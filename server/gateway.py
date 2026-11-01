@@ -895,6 +895,25 @@ def fetch_user_quota_and_status(force_refresh: bool = False) -> Dict[str, Any]:
             return _CACHED_USER_QUOTA
         return {"ok": False, "error": "Language Server GetUserStatus unavailable", "models": [], "user": {}}
 
+    # Query RetrieveUserQuotaSummary to get the authoritative weekly quota buckets (gemini-weekly & 3p-weekly)
+    weekly_buckets: Dict[str, Dict[str, Any]] = {}
+    quota_groups_raw = _call_ls_json("RetrieveUserQuotaSummary", {}, timeout=2.5)
+    if isinstance(quota_groups_raw, dict):
+        q_resp = quota_groups_raw.get("response") if isinstance(quota_groups_raw.get("response"), dict) else quota_groups_raw
+        for grp in (q_resp.get("groups") or []):
+            if not isinstance(grp, dict):
+                continue
+            g_name = (grp.get("displayName") or "").lower()
+            is_gemini_grp = "gemini" in g_name
+            for bkt in (grp.get("buckets") or []):
+                if not isinstance(bkt, dict):
+                    continue
+                b_win = (bkt.get("window") or "").lower()
+                b_id = (bkt.get("bucketId") or "").lower()
+                if b_win == "weekly" or "weekly" in b_id:
+                    key = "gemini" if (is_gemini_grp or "gemini" in b_id) else "3p"
+                    weekly_buckets[key] = bkt
+
     user_tier = us.get("userTier") or {}
     plan_status = us.get("planStatus") or {}
     plan_info = plan_status.get("planInfo") or {}
@@ -935,6 +954,10 @@ def fetch_user_quota_and_status(force_refresh: bool = False) -> Dict[str, Any]:
             effort = m_paren.group(2).strip()
 
         qi = cfg.get("quotaInfo") or {}
+        is_gemini_model = "gemini" in label.lower() or "gemini" in model_id.lower()
+        wb = weekly_buckets.get("gemini" if is_gemini_model else "3p")
+        if isinstance(wb, dict):
+            qi = wb
         reset_time = (qi.get("resetTime") or "").strip()
         if "remainingFraction" in qi and qi.get("remainingFraction") is not None:
             try:
