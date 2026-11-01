@@ -1972,23 +1972,15 @@ async def read_ws_frame(reader: asyncio.StreamReader) -> Optional[str]:
     return ""
 
 
+_CACHED_APK_BADGING: Dict[str, Any] = {"sig": "", "code": 0, "name": ""}
+
+
 def get_apk_version_info() -> Dict[str, Any]:
     apk_file = DIST_DIR / "AntigravityMobile.apk"
     manifest_file = PROJECT_ROOT / "android" / "AndroidManifest.xml"
     v_code = 4
     v_name = "2.2.0"
-    if manifest_file.is_file():
-        try:
-            m_txt = manifest_file.read_text(encoding="utf-8", errors="replace")
-            mc = re.search(r'android:versionCode="(\d+)"', m_txt)
-            mn = re.search(r'android:versionName="([^"]+)"', m_txt)
-            if mc:
-                v_code = int(mc.group(1))
-            if mn:
-                v_name = mn.group(1)
-        except Exception:
-            pass
-    apk_exists = apk_file.is_file()
+    apk_exists = apk_file.is_file() and apk_file.stat().st_size > 10000
     apk_size = 0
     apk_mtime = 0
     apk_sha256 = ""
@@ -1997,7 +1989,33 @@ def get_apk_version_info() -> Dict[str, Any]:
             st = apk_file.stat()
             apk_size = st.st_size
             apk_mtime = int(st.st_mtime)
-            apk_sha256 = hashlib.sha256(apk_file.read_bytes()).hexdigest()[:12]
+            raw_bytes = apk_file.read_bytes()
+            apk_sha256 = hashlib.sha256(raw_bytes).hexdigest()[:12]
+            sig = f"{apk_mtime}:{apk_size}:{apk_sha256}"
+            if _CACHED_APK_BADGING.get("sig") == sig and _CACHED_APK_BADGING.get("code"):
+                v_code = _CACHED_APK_BADGING["code"]
+                v_name = _CACHED_APK_BADGING["name"]
+            else:
+                aapt_bin = Path("/opt/homebrew/share/android-commandlinetools/build-tools/34.0.0/aapt")
+                if aapt_bin.exists():
+                    out = subprocess.check_output([str(aapt_bin), "dump", "badging", str(apk_file)], text=True, timeout=2.0)
+                    mc = re.search(r"versionCode='(\d+)'", out)
+                    mn = re.search(r"versionName='([^']+)'", out)
+                    if mc and mn:
+                        v_code = int(mc.group(1))
+                        v_name = mn.group(1)
+                        _CACHED_APK_BADGING.update({"sig": sig, "code": v_code, "name": v_name})
+        except Exception:
+            pass
+    if v_code <= 4 and manifest_file.is_file():
+        try:
+            m_txt = manifest_file.read_text(encoding="utf-8", errors="replace")
+            mc = re.search(r'android:versionCode="(\d+)"', m_txt)
+            mn = re.search(r'android:versionName="([^"]+)"', m_txt)
+            if mc:
+                v_code = int(mc.group(1))
+            if mn:
+                v_name = mn.group(1)
         except Exception:
             pass
     return {
@@ -2316,7 +2334,11 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                     200,
                     apk_file.read_bytes(),
                     "application/vnd.android.package-archive",
-                    {"Content-Disposition": 'attachment; filename="AntigravityMobile.apk"'},
+                    {
+                        "Content-Disposition": 'attachment; filename="AntigravityMobile.apk"',
+                        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                        "Pragma": "no-cache",
+                    },
                 )
             else:
                 send_http_response(writer, 404, b"APK not built yet", "text/plain")

@@ -114,9 +114,10 @@ echo "✍️ Signing APK -> $OUTPUT_APK..."
   --ks-pass pass:android \
   --key-pass pass:android \
   --ks-key-alias androiddebugkey \
-  --out "$OUTPUT_APK" \
+  --out "$BUILD_DIR/signed.apk" \
   "$BUILD_DIR/aligned.apk"
 
-"$APKSIGNER" verify "$OUTPUT_APK"
+"$APKSIGNER" verify "$BUILD_DIR/signed.apk"
+mv -f "$BUILD_DIR/signed.apk" "$OUTPUT_APK"
 cp -f "$OUTPUT_APK" "$HOME/Desktop/AntigravityMobile.apk" 2>/dev/null || true
 echo "✅ Successfully built signed APK: $OUTPUT_APK ($(du -h "$OUTPUT_APK" | cut -f1))"

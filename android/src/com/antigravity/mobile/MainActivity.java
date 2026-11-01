@@ -293,7 +293,7 @@ public class MainActivity extends Activity {
                     return;
                 }
             }
-            Uri apkUri = Uri.parse("content://" + ApkProvider.AUTHORITY + "/AntigravityMobile.apk");
+            Uri apkUri = Uri.parse("content://" + ApkProvider.AUTHORITY + "/AntigravityMobile_" + System.currentTimeMillis() + ".apk");
             Intent installIntent = new Intent(Intent.ACTION_VIEW);
             installIntent.setDataAndType(apkUri, "application/vnd.android.package-archive");
             installIntent.setClipData(ClipData.newRawUri("", apkUri));
@@ -508,6 +508,7 @@ public class MainActivity extends Activity {
                 File apkDir = new File(getCacheDir(), "apk");
                 if (!apkDir.exists()) apkDir.mkdirs();
                 File apkFile = new File(apkDir, "AntigravityMobile.apk");
+                if (apkFile.exists()) apkFile.delete();
                 try (FileOutputStream fos = new FileOutputStream(apkFile, false)) {
                     fos.write(bytes);
                     fos.flush();
