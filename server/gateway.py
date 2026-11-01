@@ -740,6 +740,14 @@ def query_conversations(project_id: str = "", search_query: str = "", limit: int
                     pass
 
             pid = (r.get("project_id") or "").strip()
+            ov_proj = _load_conv_project_overrides().get(cid)
+            if isinstance(ov_proj, dict) and ov_proj.get("project_id"):
+                pid = ov_proj["project_id"]
+                ov_ws = ov_proj.get("workspace_uri", "")
+                if ov_ws:
+                    ov_ws_path = urllib.parse.unquote(ov_ws[7:]) if ov_ws.startswith("file://") else ov_ws
+                    if ov_ws_path and ov_ws_path not in workspaces:
+                        workspaces.append(ov_ws_path)
             if not pid or pid == "outside-of-project":
                 inferred_pid, inferred_ws, _ = resolve_project_and_workspace(
                     workspace=workspaces[0] if workspaces else "",
@@ -1044,6 +1052,11 @@ def fetch_conversation_summary_row(conversation_id: str) -> Dict[str, Any]:
             pass
     if time.time() - RECENTLY_ACTIVE_CONVS.get(conversation_id, 0.0) < 6.0:
         summary["is_running"] = True
+    ov_proj = _load_conv_project_overrides().get(conversation_id)
+    if isinstance(ov_proj, dict) and ov_proj.get("project_id"):
+        summary["project_id"] = ov_proj["project_id"]
+        if ov_proj.get("workspace_uri"):
+            summary["workspace_uris"] = json.dumps([ov_proj["workspace_uri"]])
     return summary
 
 
@@ -1864,17 +1877,73 @@ def rename_conversation(conversation_id: str, new_title: str) -> Dict[str, Any]:
     return {"ok": True, "conversation_id": conversation_id, "title": clean_t}
 
 
-def move_conversation_to_project(conversation_id: str, project_id: str, workspace: str = "") -> Dict[str, Any]:
-    """Move an existing conversation into a Project folder (or Global / Scratch)."""
-    if not conversation_id:
-        return {"ok": False, "error": "Missing conversation_id"}
-    if project_id in ("outside-of-project", "global", ""):
-        matched_pid = "outside-of-project"
-        ws_uri = ""
-    else:
-        matched_pid, _, ws_uri = resolve_project_and_workspace(workspace=workspace, project_id=project_id)
-        if not matched_pid:
-            matched_pid = project_id
+CONV_PROJECT_OVERRIDES_FILE = PROJECT_ROOT / "server" / ".conv_project_overrides.json"
+_CONV_PROJECT_OVERRIDES_CACHE: Optional[Dict[str, Dict[str, str]]] = None
+
+
+def _load_conv_project_overrides() -> Dict[str, Dict[str, str]]:
+    global _CONV_PROJECT_OVERRIDES_CACHE
+    if _CONV_PROJECT_OVERRIDES_CACHE is not None:
+        return _CONV_PROJECT_OVERRIDES_CACHE
+    if CONV_PROJECT_OVERRIDES_FILE.is_file():
+        try:
+            data = json.loads(CONV_PROJECT_OVERRIDES_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                _CONV_PROJECT_OVERRIDES_CACHE = data
+                return _CONV_PROJECT_OVERRIDES_CACHE
+        except Exception:
+            pass
+    _CONV_PROJECT_OVERRIDES_CACHE = {}
+    return _CONV_PROJECT_OVERRIDES_CACHE
+
+
+def _save_conv_project_overrides(overrides: Dict[str, Dict[str, str]]) -> None:
+    global _CONV_PROJECT_OVERRIDES_CACHE
+    _CONV_PROJECT_OVERRIDES_CACHE = overrides
+    try:
+        CONV_PROJECT_OVERRIDES_FILE.write_text(json.dumps(overrides, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _patch_trajectory_db_project_id(conversation_id: str, project_id: str) -> None:
+    """Update CortexTrajectoryMetadata.project_id (field 18, tag \\x92\\x01) in conversations/<cid>.db."""
+    conv_db = APP_DATA_DIR / "conversations" / f"{conversation_id}.db"
+    if not conv_db.is_file():
+        return
+    try:
+        conn = sqlite3.connect(str(conv_db), timeout=3.0)
+        row = conn.execute("SELECT data FROM trajectory_metadata_blob WHERE id = 'main'").fetchone()
+        if row and row[0]:
+            blob = bytes(row[0])
+            pid_bytes = project_id.encode("utf-8")
+            new_field = b"\x92\x01" + bytes([len(pid_bytes)]) + pid_bytes
+            idx = blob.rfind(b"\x92\x01")
+            if idx != -1 and idx >= len(blob) - 80:
+                new_blob = blob[:idx] + new_field
+            else:
+                new_blob = blob + new_field
+            if new_blob != blob:
+                conn.execute("UPDATE trajectory_metadata_blob SET data = ? WHERE id = 'main'", (new_blob,))
+                conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def _apply_conversation_project_everywhere(conversation_id: str, matched_pid: str, ws_uri: str) -> None:
+    """Sync conversation project assignment across conversations/<cid>.db, JetboxWriteSummary, and conversation_summaries.db."""
+    _patch_trajectory_db_project_id(conversation_id, matched_pid)
+    try:
+        all_traj = _call_ls_json("GetAllCascadeTrajectories", {}, timeout=3.0) or {}
+        summary = (all_traj.get("trajectorySummaries") or {}).get(conversation_id)
+        if isinstance(summary, dict):
+            summary.setdefault("trajectoryMetadata", {})["projectId"] = matched_pid
+            if ws_uri:
+                summary["workspaces"] = [{"workspaceFolderAbsoluteUri": ws_uri}]
+            _call_ls_json("JetboxWriteSummary", {"cascadeId": conversation_id, "summary": summary}, timeout=2.5)
+    except Exception:
+        pass
     if DB_PATH.exists():
         try:
             conn = sqlite3.connect(str(DB_PATH), timeout=5.0)
@@ -1890,8 +1959,25 @@ def move_conversation_to_project(conversation_id: str, project_id: str, workspac
                 )
             conn.commit()
             conn.close()
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
+        except Exception:
+            pass
+
+
+def move_conversation_to_project(conversation_id: str, project_id: str, workspace: str = "") -> Dict[str, Any]:
+    """Move an existing conversation into a Project folder (or Global / Scratch)."""
+    if not conversation_id:
+        return {"ok": False, "error": "Missing conversation_id"}
+    if project_id in ("outside-of-project", "global", ""):
+        matched_pid = "outside-of-project"
+        ws_uri = ""
+    else:
+        matched_pid, _, ws_uri = resolve_project_and_workspace(workspace=workspace, project_id=project_id)
+        if not matched_pid:
+            matched_pid = project_id
+    overrides = dict(_load_conv_project_overrides())
+    overrides[conversation_id] = {"project_id": matched_pid, "workspace_uri": ws_uri}
+    _save_conv_project_overrides(overrides)
+    _apply_conversation_project_everywhere(conversation_id, matched_pid, ws_uri)
     TRANSCRIPT_CACHE.pop(conversation_id, None)
     return {"ok": True, "conversation_id": conversation_id, "project_id": matched_pid, "workspace_uri": ws_uri}
 
@@ -2059,9 +2145,33 @@ async def live_watcher_loop() -> None:
     if apk_init.is_file():
         last_apk_mtime = apk_init.stat().st_mtime
     last_convs_sig: Any = None
+    last_override_check_ts = 0.0
 
     while True:
         await asyncio.sleep(0.5)
+
+        # 0a. Enforce persistent project overrides if an active turn flushed old in-memory metadata
+        now_loop = time.time()
+        if now_loop - last_override_check_ts >= 2.0 and DB_PATH.exists():
+            last_override_check_ts = now_loop
+            try:
+                overrides = _load_conv_project_overrides()
+                if overrides:
+                    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=2.0)
+                    for ov_cid, ov_info in list(overrides.items()):
+                        target_pid = ov_info.get("project_id", "")
+                        target_ws = ov_info.get("workspace_uri", "")
+                        if not target_pid:
+                            continue
+                        row = conn.execute(
+                            "SELECT project_id, raw_summary FROM conversation_summaries WHERE conversation_id = ?",
+                            (ov_cid,),
+                        ).fetchone()
+                        if row and (row[0] != target_pid or (row[1] and target_pid.encode("utf-8") not in bytes(row[1]))):
+                            _apply_conversation_project_everywhere(ov_cid, target_pid, target_ws)
+                    conn.close()
+            except Exception:
+                pass
 
         # 0. Auto-dequeue queued messages for any conversation whose running task has completed
         try:

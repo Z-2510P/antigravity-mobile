@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 server/.ls_env.json
+server/.conv_project_overrides.json
 server/*.crt
 server/*.key
 server/*.pem
