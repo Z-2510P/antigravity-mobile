@@ -2315,14 +2315,30 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         if path in ("/", "/index.html"):
             index_file = WEB_DIR / "index.html"
             if index_file.exists():
-                send_http_response(writer, 200, index_file.read_bytes(), "text/html; charset=utf-8")
+                send_http_response(
+                    writer,
+                    200,
+                    index_file.read_bytes(),
+                    "text/html; charset=utf-8",
+                    {
+                        "Clear-Site-Data": '"cache"',
+                        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                        "Strict-Transport-Security": "max-age=31536000",
+                    },
+                )
             else:
                 send_http_response(writer, 404, b"index.html not found", "text/plain")
 
         elif path in ("/favicon.png", "/favicon.ico"):
             fav_file = WEB_DIR / "favicon.png"
             if fav_file.exists():
-                send_http_response(writer, 200, fav_file.read_bytes(), "image/png")
+                send_http_response(
+                    writer,
+                    200,
+                    fav_file.read_bytes(),
+                    "image/png",
+                    {"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+                )
             else:
                 send_http_response(writer, 404, b"", "text/plain")
 
