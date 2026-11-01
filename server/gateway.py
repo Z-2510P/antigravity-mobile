@@ -243,22 +243,18 @@ def get_lan_ips() -> List[str]:
 
 
 def get_tailscale_info() -> Dict[str, Any]:
-    if not TAILSCALE_BIN.exists():
-        return {"installed": False, "running": False, "ip": None, "hostname": None}
+    """Passively detect Tailscale CGNAT IPv4 (100.64.0.0/10) via ifconfig without launching Tailscale.app GUI."""
+    installed = TAILSCALE_BIN.exists() or Path("/opt/homebrew/bin/tailscale").exists() or Path("/usr/local/bin/tailscale").exists()
     try:
-        proc = subprocess.run(
-            [str(TAILSCALE_BIN), "ip", "-4"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        out = (proc.stdout or "").strip()
-        if proc.returncode == 0 and out and re.match(r"^\d+\.\d+\.\d+\.\d+", out.splitlines()[0]):
-            ts_ip = out.splitlines()[0].strip()
-            return {"installed": True, "running": True, "ip": ts_ip}
-        return {"installed": True, "running": False, "ip": None, "detail": (proc.stderr or out).strip()}
-    except Exception as e:
-        return {"installed": True, "running": False, "ip": None, "detail": str(e)}
+        out = subprocess.check_output(["ifconfig"], text=True, timeout=1.5)
+        for m in re.finditer(r"inet\s+(100\.(\d+)\.\d+\.\d+)", out):
+            ip = m.group(1)
+            second_octet = int(m.group(2))
+            if 64 <= second_octet <= 127:
+                return {"installed": True, "running": True, "ip": ip}
+    except Exception:
+        pass
+    return {"installed": installed, "running": False, "ip": None}
 
 
 # ---------------------------------------------------------------------------
