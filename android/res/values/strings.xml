@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Antigravity</string>
+    <string name="default_server_url">http://127.0.0.1:8899</string>
+</resources>

@@ -1,0 +1,23 @@
+# Environment & Local Secrets
+.env
+.env.*
+!.env.example
+server/.ls_env.json
+server/*.crt
+server/*.key
+server/*.pem
+
+# Python Bytecode & Logs
+__pycache__/
+*.py[cod]
+*.log
+
+# Android Build Intermediates & Local Keystores
+android/build/
+android/debug.keystore
+android/res/raw/server_cert.pem
+android/*.idsig
+dist/
+
+# macOS
+.DS_Store
